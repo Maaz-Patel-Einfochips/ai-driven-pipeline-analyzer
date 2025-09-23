@@ -1,0 +1,30 @@
+// @Library('your-shared-library') _   // (Optional) if you have a shared lib
+
+pipeline {
+    agent any
+
+    parameters {
+        choice(
+            name: 'SELECTED_JOB',
+            choices: getAllJobs(),
+            description: 'Select a Jenkins project from the list'
+        )
+    }
+
+    stages {
+        stage('Show Selection') {
+            steps {
+                script {
+                    echo "You selected project: ${params.SELECTED_JOB}"
+                }
+            }
+        }
+    }
+}
+
+@NonCPS
+def getAllJobs() {
+    // This function uses Jenkins API to fetch job names
+    def jobNames = Jenkins.instance.getAllItems(Job.class).collect { it.fullName }
+    return jobNames ? jobNames.join('\n') : 'No_Jobs_Found'
+}

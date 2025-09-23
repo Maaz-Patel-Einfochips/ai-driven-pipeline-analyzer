@@ -1,0 +1,402 @@
+pipeline {
+    agent any
+    environment {
+        RAG_API_URL   = 'http://localhost:8000'
+        JENKINS_URL   = 'http://localhost:8080'
+    }
+    
+    parameters {
+        choice(
+            name: 'ACTION',
+            choices: ['List and Select Pipeline', 'Skip to Analysis'],
+            description: 'Choose action to perform'
+        )
+    }
+    
+    stages {
+        stage('List Available Pipelines') {
+            when {
+                expression { params.ACTION == 'List and Select Pipeline' }
+            }
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: 'jenkins-api-token',
+                        usernameVariable: 'JENKINS_USER',
+                        passwordVariable: 'JENKINS_TOKEN'
+                    )]) {
+                        echo "Fetching available Jenkins pipelines..."
+                        
+                        // Get list of all jobs from Jenkins API
+                        def jobsResponse = sh(
+                            script: '''
+                                 curl -s -u "$JENKINS_USER:$JENKINS_TOKEN" \
+                                    "$JENKINS_URL/api/json?tree=jobs%5Bname,_class%5D" \
+                                    -H "Accept: application/json"
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                        
+                        def jobsJson = readJSON text: jobsResponse
+                        def availableJobs = []
+                        
+                        // Filter for pipeline jobs (WorkflowJob class)
+                        jobsJson.jobs.each { job ->
+                            if (job._class == 'org.jenkinsci.plugins.workflow.job.WorkflowJob' || 
+                                job._class == 'hudson.model.FreeStyleProject') {
+                                availableJobs.add(job.name)
+                            }
+                        }
+                        
+                        if (availableJobs.isEmpty()) {
+                            error "❌ No pipeline jobs found in Jenkins"
+                        }
+                        
+                        echo " Available Pipelines:"
+                        availableJobs.eachWithIndex { job, index ->
+                            echo "${index + 1}. ${job}"
+                        }
+                        
+                        // Store jobs list for next stage
+                        env.AVAILABLE_JOBS = availableJobs.join(',')
+                        
+                        // User selection using input step
+                        def selectedJob = input(
+                            message: 'Select a pipeline for analysis:',
+                            parameters: [
+                                choice(
+                                    name: 'SELECTED_PIPELINE',
+                                    choices: availableJobs,
+                                    description: 'Choose which pipeline to analyze'
+                                )
+                            ]
+                        )
+                        
+                        env.TARGET_JOB = selectedJob
+                        echo "✅ Selected pipeline: ${selectedJob}"
+                    }
+                }
+            }
+        }
+        
+        stage('Fetch Pipeline Configuration') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: 'jenkins-api-token',
+                        usernameVariable: 'JENKINS_USER',
+                        passwordVariable: 'JENKINS_TOKEN'
+                    )]) {
+                        echo "Analyzing pipeline: ${env.TARGET_JOB}"
+                        
+                        // Download config.xml safely
+                        sh '''
+                            curl -s -u "$JENKINS_USER:$JENKINS_TOKEN" \
+                                "$JENKINS_URL/job/$TARGET_JOB/config.xml" > job-config.xml
+                        '''
+                        
+                        // Extract pipeline script based on job type
+                        def configContent = readFile('job-config.xml')
+                        def pipelineScript = ""
+                        
+                        if (configContent.contains('<script>')) {
+                            // Pipeline job with inline script
+                            sh '''
+                                sed -n "/<script>/,/<\\/script>/p" job-config.xml | \
+                                sed 's/<\\/?script>//g' > extracted-pipeline.groovy
+                            '''
+                            pipelineScript = readFile('extracted-pipeline.groovy')
+                        } else if (configContent.contains('<definition class="org.jenkinsci.plugins.workflow.cps.CpsScmFlowDefinition">')) {
+                            // Pipeline from SCM
+                            pipelineScript = "Pipeline script is loaded from SCM (Jenkinsfile in repository)"
+                        } else {
+                            // Freestyle project or other type
+                            pipelineScript = "Freestyle project - build steps extracted from configuration"
+                        }
+                        
+                        // Build analysis prompt
+                        def combinedPrompt = """=== JENKINS PIPELINE ANALYSIS ===
+Pipeline Name: ${env.TARGET_JOB}
+Pipeline Type: ${configContent.contains('<script>') ? 'Inline Pipeline' : 'SCM Pipeline'}
+
+=== PIPELINE SCRIPT ===
+${pipelineScript}
+
+=== YOCTO BUILD CONTEXT ===
+meta-myhello layer with hello-world recipe
+RECIPE: hello-world_1.0.bb
+DESCRIPTION: Simple Hello World Application
+LICENSE: MIT
+SRC_URI: file://hello-world.c
+
+=== BUILD CONFIGURATION ===
+MACHINE = qemux86-64
+IMAGE = core-image-minimal
+BB_NUMBER_THREADS = 8
+PARALLEL_MAKE = -j4
+SSTATE_DIR = /yocto-builds/yocto-sstate
+DL_DIR = /yocto-builds/yocto-dl
+TMPDIR = /yocto-builds/tmp
+
+=== ANALYSIS REQUEST ===
+Analyze this pipeline configuration and predict:
+1. Build success probability (0-100%)
+2. Potential failure points
+3. Risk factors
+4. Confidence level in prediction
+5. Recommended actions
+
+Provide structured output with:
+CONFIDENCE: [percentage]%
+PREDICTION: [PASS/FAIL/HIGH_RISK/MEDIUM_RISK]
+ANALYSIS: [detailed analysis]
+RECOMMENDATIONS: [actionable suggestions]"""
+
+                        // Escape for JSON
+                        def escapedPrompt = combinedPrompt
+                            .replace('\\', '\\\\')
+                            .replace('"', '\\"')
+                            .replace('\n', '\\n')
+                            .replace('\r', '')
+                            .replace('\t', '\\t')
+                        
+                        def payload = """{
+    "prompt": "${escapedPrompt}",
+    "model": "codellama-rag"
+}"""
+                        
+                        writeFile file: 'payload.json', text: payload
+                        echo "✅ Prepared analysis payload for RAG API"
+                    }
+                }
+            }
+        }
+        
+        stage('RAG Analysis & Prediction') {
+            steps {
+                script {
+                    echo "Sending pipeline to RAG API for analysis..."
+                    
+                    def response = sh(
+                        script: '''
+                            curl -X POST \
+                                 -H "Content-Type: application/json" \
+                                 -H "X-User-ID: jenkins-pipeline-analyzer" \
+                                 --data @payload.json \
+                                 --max-time 1800 \
+                                 --connect-timeout 60 \
+                                 -w "\nHTTP_CODE:%{http_code}\n" \
+                                 "$RAG_API_URL/api/generate"
+                        ''',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def httpCodeLine = response.split('\n').find { it.contains('HTTP_CODE:') }
+                    
+                    if (httpCodeLine && httpCodeLine.contains('200')) {
+                        def responseBody = response.replace(httpCodeLine, '').trim()
+                        
+                        try {
+                            def jsonResponse = readJSON text: responseBody
+                            def analysis = jsonResponse.response
+                            
+                            // Extract key metrics from analysis
+                            def confidence = "Unknown"
+                            def prediction = "Unknown"
+                            
+                            if (analysis.contains('CONFIDENCE:')) {
+                                confidence = analysis.find(/CONFIDENCE:\s*(\d+)%/) { match, conf -> conf + '%' } ?: "Unknown"
+                            }
+                            
+                            if (analysis.contains('PREDICTION:')) {
+                                prediction = analysis.find(/PREDICTION:\s*(\w+)/) { match, pred -> pred } ?: "Unknown"
+                            }
+                            
+                            echo """
+📊 PIPELINE ANALYSIS RESULTS
+════════════════════════════════════════════════════════════════
+Pipeline: ${env.TARGET_JOB}
+Confidence Level: ${confidence}
+Prediction: ${prediction}
+════════════════════════════════════════════════════════════════
+
+📋 DETAILED ANALYSIS:
+${analysis}
+════════════════════════════════════════════════════════════════
+"""
+                            
+                            // Store results for next stage
+                            env.ANALYSIS_CONFIDENCE = confidence
+                            env.ANALYSIS_PREDICTION = prediction
+                            env.ANALYSIS_DETAILS = analysis
+                            
+                            // Set build status based on prediction
+                            if (analysis.contains('PREDICTION: FAIL')) {
+                                currentBuild.result = 'UNSTABLE'
+                                env.BUILD_RECOMMENDATION = 'NOT_RECOMMENDED'
+                            } else if (analysis.contains('PREDICTION: HIGH_RISK')) {
+                                currentBuild.result = 'UNSTABLE'
+                                env.BUILD_RECOMMENDATION = 'PROCEED_WITH_CAUTION'
+                            } else {
+                                env.BUILD_RECOMMENDATION = 'RECOMMENDED'
+                            }
+                            
+                        } catch (Exception e) {
+                            echo "❌ Could not parse analysis response: ${e.message}"
+                            env.ANALYSIS_CONFIDENCE = "Unknown"
+                            env.ANALYSIS_PREDICTION = "Parse Error"
+                            env.BUILD_RECOMMENDATION = 'MANUAL_REVIEW_REQUIRED'
+                        }
+                    } else {
+                        error "❌ RAG API request failed with code: ${httpCodeLine}"
+                    }
+                    
+                    writeFile file: 'analysis-results.txt', text: response
+                    archiveArtifacts artifacts: 'analysis-results.txt,payload.json', fingerprint: true
+                }
+            }
+        }
+        
+        stage('Execution Decision') {
+            steps {
+                script {
+                    echo """
+ EXECUTION DECISION REQUIRED
+════════════════════════════════════════════════════════════════
+Pipeline: ${env.TARGET_JOB}
+Confidence: ${env.ANALYSIS_CONFIDENCE}
+Prediction: ${env.ANALYSIS_PREDICTION}
+Recommendation: ${env.BUILD_RECOMMENDATION}
+════════════════════════════════════════════════════════════════
+"""
+                    
+                    def executeDecision = input(
+                        message: """
+Analysis Complete! 
+
+Confidence: ${env.ANALYSIS_CONFIDENCE}
+Prediction: ${env.ANALYSIS_PREDICTION}
+Status: ${env.BUILD_RECOMMENDATION}
+
+Do you want to execute the pipeline '${env.TARGET_JOB}' now?
+""",
+                        parameters: [
+                            choice(
+                                name: 'EXECUTE_PIPELINE',
+                                choices: ['No - Just show analysis', 'Yes - Execute now', 'Yes - Schedule for later'],
+                                description: 'Choose your action based on the analysis'
+                            )
+                        ]
+                    )
+                    
+                    env.EXECUTION_CHOICE = executeDecision
+                }
+            }
+        }
+        
+        stage('Execute Selected Pipeline') {
+            when {
+                expression { 
+                    env.EXECUTION_CHOICE == 'Yes - Execute now' 
+                }
+            }
+            steps {
+                script {
+                    echo "Executing pipeline: ${env.TARGET_JOB}"
+                    
+                    withCredentials([usernamePassword(
+                        credentialsId: 'jenkins-api-token',
+                        usernameVariable: 'JENKINS_USER',
+                        passwordVariable: 'JENKINS_TOKEN'
+                    )]) {
+                        // Get CSRF crumb for security
+                        def crumbResponse = sh(
+                            script: '''
+                                curl -s -u "$JENKINS_USER:$JENKINS_TOKEN" \
+                                    "$JENKINS_URL/crumbIssuer/api/json"
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                        
+                        def crumbJson = readJSON text: crumbResponse
+                        def crumbValue = crumbJson.crumb
+                        def crumbField = crumbJson.crumbRequestField
+                        
+                        // Trigger the build
+                        def buildResponse = sh(
+                            script: """
+                                curl -X POST \
+                                     -u "\$JENKINS_USER:\$JENKINS_TOKEN" \
+                                     -H "${crumbField}: ${crumbValue}" \
+                                     -w "HTTP_CODE:%{http_code}" \
+                                     "\$JENKINS_URL/job/\$TARGET_JOB/build"
+                            """,
+                            returnStdout: true
+                        ).trim()
+                        
+                        if (buildResponse.contains('HTTP_CODE:201') || buildResponse.contains('HTTP_CODE:200')) {
+                            echo "✅ Successfully triggered build for: ${env.TARGET_JOB}"
+                            echo "Check build status at: ${env.JENKINS_URL}/job/${env.TARGET_JOB}/"
+                        } else {
+                            echo "❌ Failed to trigger build. Response: ${buildResponse}"
+                            currentBuild.result = 'FAILURE'
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Schedule Pipeline') {
+            when {
+                expression { 
+                    env.EXECUTION_CHOICE == 'Yes - Schedule for later' 
+                }
+            }
+            steps {
+                script {
+                    def scheduleTime = input(
+                        message: 'When would you like to schedule the pipeline execution?',
+                        parameters: [
+                            string(
+                                name: 'SCHEDULE_TIME',
+                                defaultValue: '*/30 * * * *',
+                                description: 'Cron expression (e.g., "0 2 * * *" for 2 AM daily)'
+                            )
+                        ]
+                    )
+                    
+                    echo "Pipeline ${env.TARGET_JOB} scheduled with cron: ${scheduleTime}"
+                    echo "You'll need to manually configure this schedule in the target pipeline settings."
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo """
+📋 PIPELINE ANALYSIS SUMMARY
+════════════════════════════════════════════════════════════════
+Selected Pipeline: ${env.TARGET_JOB ?: 'None'}
+Analysis Confidence: ${env.ANALYSIS_CONFIDENCE ?: 'N/A'}
+Prediction Result: ${env.ANALYSIS_PREDICTION ?: 'N/A'}
+Execution Choice: ${env.EXECUTION_CHOICE ?: 'No decision made'}
+════════════════════════════════════════════════════════════════
+"""
+            
+            // Cleanup temporary files
+            sh '''
+                rm -f payload.json job-config.xml extracted-pipeline.groovy 2>/dev/null || true
+            '''
+        }
+        success {
+            echo "✅ Pipeline analysis and execution workflow completed successfully"
+        }
+        failure {
+            echo "❌ Pipeline analysis workflow failed"
+        }
+        unstable {
+            echo "⚠Analysis indicates potential build issues - proceed with caution"
+        }
+    }
+}
