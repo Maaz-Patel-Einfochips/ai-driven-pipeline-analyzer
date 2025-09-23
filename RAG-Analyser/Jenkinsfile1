@@ -1,15 +1,13 @@
-@NonCPS
-def getAllJobNames() {
-    return Jenkins.instance.getAllItems(Job.class).collect { it.fullName }
-}
+@Library('jenkins-shared-lib@jenkinsfile-enhancement') _   // Load shared library
 
 pipeline {
     agent any
+
     stages {
-        stage('Fetch Jobs') {
+        stage('Fetch Jobs from Shared Library') {
             steps {
                 script {
-                    def jobs = getAllJobNames()
+                    def jobs = jobUtils.listJobs()
                     echo "✅ Available jobs: ${jobs}"
                 }
             }
