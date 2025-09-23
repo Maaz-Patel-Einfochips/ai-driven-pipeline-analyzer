@@ -1,41 +1,28 @@
 pipeline {
     agent any
 
-    environment {
-        JENKINS_URL = 'http://127.0.0.1:8080'  // replace with actual controller URL
+    parameters {
+        choice(
+            name: 'SELECTED_JOB',
+            choices: getAllJobs(),
+            description: 'Select a Jenkins project from the list'
+        )
     }
 
     stages {
-        stage('Fetch Jobs') {
+        stage('Show Selection') {
             steps {
                 script {
-                    withCredentials([usernamePassword(credentialsId: 'jenkins-api-creds',
-                                                     usernameVariable: 'USERNAME',
-                                                     passwordVariable: 'APITOKEN')]) {
-                        def jobsJson = sh(
-                            script: """curl -s -u $USERNAME:$APITOKEN $JENKINS_URL/api/json?tree=jobs[name]""",
-                            returnStdout: true
-                        ).trim()
-
-                        if (!jobsJson) {
-                            error("❌ Failed to fetch jobs from Jenkins API. Check URL & credentials.")
-                        }
-
-                        def jobs = readJSON text: jobsJson
-                        echo "✅ Available jobs: ${jobs.jobs*.name}"
-                        env.ALL_JOBS = jobs.jobs*.name.join(',')
-                    }
-                }
-            }
-        }
-
-        stage('Select Job (Example)') {
-            steps {
-                script {
-                    def allJobs = env.ALL_JOBS?.split(',') ?: []
-                    echo "Available for selection: ${allJobs}"
+                    echo "You selected project: ${params.SELECTED_JOB}"
                 }
             }
         }
     }
+}
+
+@NonCPS
+def getAllJobs() {
+    // This function uses Jenkins API to fetch job names
+    def jobNames = Jenkins.instance.getAllItems(Job.class).collect { it.fullName }
+    return jobNames ? jobNames.join('\n') : 'No_Jobs_Found'
 }
