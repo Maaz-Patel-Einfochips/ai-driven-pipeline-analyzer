@@ -1,30 +1,47 @@
-// @Library('your-shared-library') _   // (Optional) if you have a shared lib
-
 pipeline {
     agent any
 
-    parameters {
-        choice(
-            name: 'SELECTED_JOB',
-            choices: getAllJobs(),
-            description: 'Select a Jenkins project from the list'
-        )
+    environment {
+        // 👇 Store your Jenkins credentials in Jenkins Credentials Manager
+        // Example: ID = "jenkins-api-creds"
+        JENKINS_URL = 'http://localhost:8080'   // Update with your Jenkins URL
     }
 
     stages {
-        stage('Show Selection') {
+        stage('Fetch Jobs') {
             steps {
                 script {
-                    echo "You selected project: ${params.SELECTED_JOB}"
+                    withCredentials([usernamePassword(credentialsId: 'jenkins-api-creds',
+                                                     usernameVariable: 'USERNAME',
+                                                     passwordVariable: 'PASSWORD')]) {
+                        // Call Jenkins REST API
+                        def jobsJson = sh(
+                            script: """
+                                curl -s -u ${USERNAME}:${PASSWORD} ${JENKINS_URL}/api/json?tree=jobs[name]
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        // Parse JSON
+                        def jobs = readJSON text: jobsJson
+
+                        echo "✅ Available jobs: ${jobs.jobs*.name}"
+
+                        // Save job list for later stages (optional)
+                        env.ALL_JOBS = jobs.jobs*.name.join(',')
+                    }
+                }
+            }
+        }
+
+        stage('Select Job (Example)') {
+            steps {
+                script {
+                    def allJobs = env.ALL_JOBS?.split(',') ?: []
+                    echo "User could select from: ${allJobs}"
+                    // Here you could add logic to filter or choose one job dynamically
                 }
             }
         }
     }
-}
-
-@NonCPS
-def getAllJobs() {
-    // This function uses Jenkins API to fetch job names
-    def jobNames = Jenkins.instance.getAllItems(Job.class).collect { it.fullName }
-    return jobNames ? jobNames.join('\n') : 'No_Jobs_Found'
 }
