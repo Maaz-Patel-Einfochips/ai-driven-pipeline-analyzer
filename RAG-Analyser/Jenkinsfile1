@@ -2,9 +2,7 @@ pipeline {
     agent any
 
     environment {
-        // 👇 Store your Jenkins credentials in Jenkins Credentials Manager
-        // Example: ID = "jenkins-api-creds"
-        JENKINS_URL = 'http://localhost:8080'   // Update with your Jenkins URL
+        JENKINS_URL = 'http://jenkins-controller:8080'  // replace with actual controller URL
     }
 
     stages {
@@ -13,21 +11,18 @@ pipeline {
                 script {
                     withCredentials([usernamePassword(credentialsId: 'jenkins-api-creds',
                                                      usernameVariable: 'USERNAME',
-                                                     passwordVariable: 'PASSWORD')]) {
-                        // Call Jenkins REST API
+                                                     passwordVariable: 'APITOKEN')]) {
                         def jobsJson = sh(
-                            script: """
-                                curl -s -u ${USERNAME}:${PASSWORD} ${JENKINS_URL}/api/json?tree=jobs[name]
-                            """,
+                            script: """curl -s -u $USERNAME:$APITOKEN $JENKINS_URL/api/json?tree=jobs[name]""",
                             returnStdout: true
                         ).trim()
 
-                        // Parse JSON
+                        if (!jobsJson) {
+                            error("❌ Failed to fetch jobs from Jenkins API. Check URL & credentials.")
+                        }
+
                         def jobs = readJSON text: jobsJson
-
                         echo "✅ Available jobs: ${jobs.jobs*.name}"
-
-                        // Save job list for later stages (optional)
                         env.ALL_JOBS = jobs.jobs*.name.join(',')
                     }
                 }
@@ -38,8 +33,7 @@ pipeline {
             steps {
                 script {
                     def allJobs = env.ALL_JOBS?.split(',') ?: []
-                    echo "User could select from: ${allJobs}"
-                    // Here you could add logic to filter or choose one job dynamically
+                    echo "Available for selection: ${allJobs}"
                 }
             }
         }
