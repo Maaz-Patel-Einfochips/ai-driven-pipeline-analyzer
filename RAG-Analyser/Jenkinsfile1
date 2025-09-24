@@ -1,31 +1,31 @@
 @Library('jenkins-shared-lib@jenkinsfile-enhancement') _   // Load shared library
 
-pipeline {
-    agent any
-
-    parameters {
-        choice(
-            name: 'JOB_NAME',
-            choices: jobUtils.listJobs().join('\n'),
-            description: 'Select the Jenkins job to fetch config.xml'
-        )
+node {
+    stage('Setup Parameter') {
+        script {
+            properties([
+              parameters([
+                [$class: 'ChoiceParameter',
+                  name: 'JOB_NAME',
+                  description: 'Select a Jenkins job',
+                  choices: jobUtils.listJobs()
+                ]
+              ])
+            ])
+        }
     }
 
-    stages {
-        stage('Fetch Job Config') {
-            steps {
-                script {
-                    def configXml = jobUtils.getJobConfig(params.JOB_NAME)
+    stage('Fetch Config') {
+        script {
+            echo "🔍 You selected job: ${params.JOB_NAME}"
 
-                    if (configXml) {
-                        echo "📄 Config of ${params.JOB_NAME}:\n${configXml.take(500)}..."
-                        // Save config.xml into workspace
-                        writeFile file: "${params.JOB_NAME}-config.xml", text: configXml
-                        archiveArtifacts artifacts: "${params.JOB_NAME}-config.xml", fingerprint: true
-                    } else {
-                        error("❌ No config found for ${params.JOB_NAME}")
-                    }
-                }
+            def configXml = jobUtils.getJobConfig(params.JOB_NAME)
+            if (configXml) {
+                echo "📄 Config XML for ${params.JOB_NAME}:\n${configXml.take(500)}..."
+                writeFile file: "${params.JOB_NAME}-config.xml", text: configXml
+                archiveArtifacts artifacts: "${params.JOB_NAME}-config.xml"
+            } else {
+                error "❌ Could not fetch config for ${params.JOB_NAME}"
             }
         }
     }
