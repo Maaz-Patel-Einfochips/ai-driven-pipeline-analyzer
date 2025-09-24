@@ -3,27 +3,27 @@
 pipeline {
     agent any
 
-    stages {
-        stage('Fetch Jobs from Shared Library') {
-            steps {
-                script {
-                    def jobs = jobUtils.listJobs()
-                    echo "✅ Available jobs: ${jobs}"
-                }
-            }
-        }
+    parameters {
+        choice(
+            name: 'JOB_NAME',
+            choices: jobUtils.listJobs().join('\n'),
+            description: 'Select the Jenkins job to fetch config.xml'
+        )
+    }
 
+    stages {
         stage('Fetch Job Config') {
             steps {
                 script {
-                    // Pick the first job for demo
-                    def jobName = jobUtils.listJobs()[0]
-                    def configXml = jobUtils.getJobConfig(jobName)
+                    def configXml = jobUtils.getJobConfig(params.JOB_NAME)
 
                     if (configXml) {
-                        echo "📄 Config of ${jobName}:\n${configXml.take(500)}..." // show first 500 chars
+                        echo "📄 Config of ${params.JOB_NAME}:\n${configXml.take(500)}..."
+                        // Save config.xml into workspace
+                        writeFile file: "${params.JOB_NAME}-config.xml", text: configXml
+                        archiveArtifacts artifacts: "${params.JOB_NAME}-config.xml", fingerprint: true
                     } else {
-                        echo "❌ No config found for ${jobName}"
+                        error("❌ No config found for ${params.JOB_NAME}")
                     }
                 }
             }
