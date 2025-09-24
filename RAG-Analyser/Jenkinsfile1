@@ -12,5 +12,21 @@ pipeline {
                 }
             }
         }
+
+        stage('Fetch Job Config') {
+            steps {
+                script {
+                    // Pick the first job for demo
+                    def jobName = jobUtils.listJobs()[0]
+                    def configXml = jobUtils.getJobConfig(jobName)
+
+                    if (configXml) {
+                        echo "📄 Config of ${jobName}:\n${configXml.take(500)}..." // show first 500 chars
+                    } else {
+                        echo "❌ No config found for ${jobName}"
+                    }
+                }
+            }
+        }
     }
 }
