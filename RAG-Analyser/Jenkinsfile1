@@ -2,19 +2,39 @@
 
 pipeline {
     agent any
+
     stages {
-        stage('Setup Parameters') {
+        stage('Fetch Jobs from Shared Library') {
             steps {
                 script {
-                    properties([
-                        parameters([
-                            [$class: 'ChoiceParameter',
-                              name: 'JOB_NAME',
-                              description: 'Select a Jenkins job',
-                              choices: jobUtils.listJobs()
-                            ]
-                        ])
-                    ])
+                    def jobs = jobUtils.listJobs()
+                    echo "✅ Available jobs: ${jobs}"
+                }
+            }
+        }
+
+        stage('Select Job') {
+            steps {
+                script {
+                    def jobs = jobUtils.listJobs()
+                    if (jobs.isEmpty()) {
+                        error "❌ No jobs found!"
+                    }
+
+                    // Pause and ask user which job to pick
+                    def selectedJob = input(
+                        message: 'Select a job to fetch its config.xml:',
+                        parameters: [
+                            choice(
+                                name: 'TARGET_JOB',
+                                choices: jobs,
+                                description: 'Choose a Jenkins job'
+                            )
+                        ]
+                    )
+
+                    env.TARGET_JOB = selectedJob
+                    echo "✅ You selected: ${env.TARGET_JOB}"
                 }
             }
         }
@@ -22,13 +42,15 @@ pipeline {
         stage('Fetch Job Config') {
             steps {
                 script {
-                    echo "🔍 You selected: ${params.JOB_NAME}"
+                    def configXml = jobUtils.getJobConfig(env.TARGET_JOB)
 
-                    def configXml = jobUtils.getJobConfig(params.JOB_NAME)
                     if (configXml) {
-                        echo "📄 Config XML for ${params.JOB_NAME}:\n${configXml.take(500)}..."
+                        echo "📄 Config of ${env.TARGET_JOB}:\n${configXml.take(500)}..."
+                        // Optionally save it as a file and archive it
+                        writeFile file: "${env.TARGET_JOB}-config.xml", text: configXml
+                        archiveArtifacts artifacts: "${env.TARGET_JOB}-config.xml", fingerprint: true
                     } else {
-                        error "❌ Could not fetch config for ${params.JOB_NAME}"
+                        echo "❌ No config found for ${env.TARGET_JOB}"
                     }
                 }
             }
