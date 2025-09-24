@@ -1,31 +1,36 @@
 @Library('jenkins-shared-lib@jenkinsfile-enhancement') _   // Load shared library
 
-node {
-    stage('Setup Parameter') {
-        script {
-            properties([
-              parameters([
-                [$class: 'ChoiceParameter',
-                  name: 'JOB_NAME',
-                  description: 'Select a Jenkins job',
-                  choices: jobUtils.listJobs()
-                ]
-              ])
-            ])
+pipeline {
+    agent any
+    stages {
+        stage('Setup Parameters') {
+            steps {
+                script {
+                    properties([
+                        parameters([
+                            [$class: 'ChoiceParameter',
+                              name: 'JOB_NAME',
+                              description: 'Select a Jenkins job',
+                              choices: jobUtils.listJobs()
+                            ]
+                        ])
+                    ])
+                }
+            }
         }
-    }
 
-    stage('Fetch Config') {
-        script {
-            echo "🔍 You selected job: ${params.JOB_NAME}"
+        stage('Fetch Job Config') {
+            steps {
+                script {
+                    echo "🔍 You selected: ${params.JOB_NAME}"
 
-            def configXml = jobUtils.getJobConfig(params.JOB_NAME)
-            if (configXml) {
-                echo "📄 Config XML for ${params.JOB_NAME}:\n${configXml.take(500)}..."
-                writeFile file: "${params.JOB_NAME}-config.xml", text: configXml
-                archiveArtifacts artifacts: "${params.JOB_NAME}-config.xml"
-            } else {
-                error "❌ Could not fetch config for ${params.JOB_NAME}"
+                    def configXml = jobUtils.getJobConfig(params.JOB_NAME)
+                    if (configXml) {
+                        echo "📄 Config XML for ${params.JOB_NAME}:\n${configXml.take(500)}..."
+                    } else {
+                        error "❌ Could not fetch config for ${params.JOB_NAME}"
+                    }
+                }
             }
         }
     }
